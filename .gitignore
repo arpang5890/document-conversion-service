@@ -1,0 +1,6 @@
+*/target/
+/.idea/*
+*.iml
+.java-version
+/target/
+/document-storage/

@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: document-service-app
+  labels:
+    app: document-service-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: document-service-app
+  template:
+    metadata:
+      labels:
+        app: document-service-app
+    spec:
+      containers:
+        - name: my-java-app
+          image: <IMAGE_PLACEHOLDER>
+          ports:
+            - containerPort: 8080
