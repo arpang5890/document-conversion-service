@@ -47,7 +47,6 @@ public class DocumentConversionService {
       document.setStatus(Document.ConversionStatus.FAILED);
       document.setErrorMessage(e.getMessage());
       metricsService.recordConversionFailure();
-      throw new ConversionException(e.getMessage(), e);
     } finally {
       if (sample != null) {
         metricsService.stopTimer(sample);
