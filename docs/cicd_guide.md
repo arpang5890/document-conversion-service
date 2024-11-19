@@ -78,13 +78,4 @@ These are loaded from the GitHub secret `AWS_CONFIG`:
 
 ## Prerequisites
 - Store the AWS configurations in GitHub secrets as `AWS_CONFIG` in JSON format.
-- Kubernetes manifests (`k8s/deployment.yaml`, `k8s/service.yaml`, `k8s/rabbit_mq_deployment.yaml`) should be included in the repository.
 - Ensure IAM roles and permissions are configured in AWS for creating and managing EKS resources.
-
-## Usage
-To use this workflow:
-1. Copy and save the provided YAML configuration in `.github/workflows/deploy.yml` in your repository.
-2. Ensure the required secrets and Kubernetes deployment files are in place.
-3. Push changes to the `master` branch to trigger the workflow.
-
-This workflow helps streamline the CI/CD pipeline by automating the testing, containerization, and deployment of services to EKS.
