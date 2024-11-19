@@ -15,7 +15,7 @@ spec:
         app: document-service-app
     spec:
       containers:
-        - name: my-java-app
+        - name: document-service-app
           image: <IMAGE_PLACEHOLDER>
           ports:
             - containerPort: 8080
