@@ -32,6 +32,7 @@ jobs:
           echo "AWS_ACCOUNT_ID=${{ fromJson(secrets.AWS_CONFIG).aws.account_id }}" >> $GITHUB_ENV
           echo "CLUSTER_NAME=${{ fromJson(secrets.AWS_CONFIG).eks.cluster_name }}" >> $GITHUB_ENV
           echo "CLUSTER_VERSION=${{ fromJson(secrets.AWS_CONFIG).eks.cluster_version }}" >> $GITHUB_ENV
+          echo "CLUSTER_REGION=${{ fromJson(secrets.AWS_CONFIG).aws.region }}" >> $GITHUB_ENV
           echo "NODE_GROUP_NAME=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.name }}" >> $GITHUB_ENV
           echo "NODE_INSTANCE_TYPE=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.instance_type }}" >> $GITHUB_ENV
           echo "NODE_MIN=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.min_size }}" >> $GITHUB_ENV
