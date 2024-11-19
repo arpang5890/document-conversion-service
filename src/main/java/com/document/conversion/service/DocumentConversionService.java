@@ -21,62 +21,71 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class DocumentConversionService {
 
-    private final DocumentRepository documentRepository;
-    private final MetricsService metricsService;
-    private final DocumentConvertFactory documentConvertFactory;
+  private final DocumentRepository documentRepository;
+  private final MetricsService metricsService;
+  private final DocumentConvertFactory documentConvertFactory;
 
-    @Transactional
-    public void startConversion(UUID documentId) {
-        Document document = documentRepository.findById(documentId)
-                .orElseThrow(() -> new DocumentNotFoundException("Document not found"));
-        Timer.Sample sample = null;
-        try {
-            sample = metricsService.startTimer();
-            metricsService.recordConversionStart();
-            document.setStatus(Document.ConversionStatus.IN_PROGRESS);
-            documentRepository.save(document);
-            String convertedFilePath = performConversion(document);
-            document.setConvertedFilePath(convertedFilePath);
-            document.setStatus(Document.ConversionStatus.COMPLETED);
-            metricsService.recordConversionSuccess();
-        } catch (Exception e) {
-            log.error("Conversion failed for document: {}", documentId, e);
-            document.setStatus(Document.ConversionStatus.FAILED);
-            document.setErrorMessage(e.getMessage());
-            metricsService.recordConversionFailure();
-        }
+  @Transactional
+  public void startConversion(UUID documentId) {
+    Document document =
+        documentRepository
+            .findById(documentId)
+            .orElseThrow(() -> new DocumentNotFoundException("Document not found"));
+    Timer.Sample sample = null;
+    try {
+      sample = metricsService.startTimer();
+      metricsService.recordConversionStart();
+      document.setStatus(Document.ConversionStatus.IN_PROGRESS);
+      documentRepository.saveAndFlush(document);
+
+      String convertedFilePath = performConversion(document);
+      document.setConvertedFilePath(convertedFilePath);
+      document.setStatus(Document.ConversionStatus.COMPLETED);
+      metricsService.recordConversionSuccess();
+    } catch (Exception e) {
+      log.error("Conversion failed for document: {}", documentId, e);
+      document.setStatus(Document.ConversionStatus.FAILED);
+      document.setErrorMessage(e.getMessage());
+      metricsService.recordConversionFailure();
+      throw new ConversionException(e.getMessage(), e);
+    } finally {
+      if (sample != null) {
         metricsService.stopTimer(sample);
-        documentRepository.save(document);
+      }
     }
+    documentRepository.save(document);
+  }
 
-    private String performConversion(Document document) throws IOException {
-        SupportedSourceFormat sourceFormat = getSourceFormat(document.getOriginalFormat());
-        SupportedTargetFormat targetFormat = getTargetFormat(document.getTargetFormat());
-        DocumentConverter documentConverter = documentConvertFactory.getConverter(sourceFormat, targetFormat);
-        return documentConverter.convert(document);
-    }
+  private String performConversion(Document document) throws IOException {
+    SupportedSourceFormat sourceFormat = getSourceFormat(document.getOriginalFormat());
+    SupportedTargetFormat targetFormat = getTargetFormat(document.getTargetFormat());
+    DocumentConverter documentConverter =
+        documentConvertFactory.getConverter(sourceFormat, targetFormat);
+    return documentConverter.convert(document);
+  }
 
-    private SupportedSourceFormat getSourceFormat(String format) {
-        try {
-            return SupportedSourceFormat.valueOf(format.toLowerCase());
-        } catch (IllegalArgumentException e) {
-            throw new ConversionException("Unsupported source format: " + format);
-        }
+  private SupportedSourceFormat getSourceFormat(String format) {
+    try {
+      return SupportedSourceFormat.valueOf(format.toLowerCase());
+    } catch (IllegalArgumentException e) {
+      throw new ConversionException("Unsupported source format: " + format);
     }
+  }
 
-    private SupportedTargetFormat getTargetFormat(String format) {
-        try {
-            return SupportedTargetFormat.valueOf(format.toLowerCase());
-        } catch (IllegalArgumentException e) {
-            throw new ConversionException("Unsupported target format: " + format);
-        }
+  private SupportedTargetFormat getTargetFormat(String format) {
+    try {
+      return SupportedTargetFormat.valueOf(format.toLowerCase());
+    } catch (IllegalArgumentException e) {
+      throw new ConversionException("Unsupported target format: " + format);
     }
+  }
 
-    public enum SupportedSourceFormat {
-        pdf
-    }
+  public enum SupportedSourceFormat {
+    pdf
+  }
 
-    public enum SupportedTargetFormat {
-        png, word
-    }
+  public enum SupportedTargetFormat {
+    png,
+    word
+  }
 }
