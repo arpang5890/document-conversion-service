@@ -6,87 +6,371 @@ on:
       - master
 
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
-
+    services:
+      rabbitmq:
+        image: rabbitmq:3-management
+        ports:
+          - 5672:5672
+          - 15672:15672
     steps:
-      # Step 1: Checkout the repository
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Step 2: Set up JDK 21
       - name: Set up JDK 21
         uses: actions/setup-java@v3
         with:
           java-version: '21'
           distribution: 'temurin'
+          cache: 'maven'
 
-      # Step 3: Build the application using Maven
-      - name: Build with Maven
-        run: mvn clean package -DskipTests
+      - name: Load AWS Configuration
+        run: |
+          # Set all configuration as environment variables from the secret
+          echo "AWS_REGION=${{ fromJson(secrets.AWS_CONFIG).aws.region }}" >> $GITHUB_ENV
+          echo "AWS_ACCOUNT_ID=${{ fromJson(secrets.AWS_CONFIG).aws.account_id }}" >> $GITHUB_ENV
+          echo "CLUSTER_NAME=${{ fromJson(secrets.AWS_CONFIG).eks.cluster_name }}" >> $GITHUB_ENV
+          echo "CLUSTER_VERSION=${{ fromJson(secrets.AWS_CONFIG).eks.cluster_version }}" >> $GITHUB_ENV
+          echo "NODE_GROUP_NAME=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.name }}" >> $GITHUB_ENV
+          echo "NODE_INSTANCE_TYPE=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.instance_type }}" >> $GITHUB_ENV
+          echo "NODE_MIN=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.min_size }}" >> $GITHUB_ENV
+          echo "NODE_MAX=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.max_size }}" >> $GITHUB_ENV
+          echo "NODE_DESIRED=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.desired_size }}" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY_NAME=${{ fromJson(secrets.AWS_CONFIG).ecr.repository_name }}" >> $GITHUB_ENV
 
-      # Step 4: Configure AWS credentials
+      - name: Run Unit Tests
+        run: mvn test
+
+      - name: Run Integration Tests
+        run: mvn verify -P integration-test
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: true
+
+      - name: Upload Test Reports
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-reports
+          path: |
+            target/surefire-reports
+            target/failsafe-reports
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Load AWS Configuration
+        run: |
+          # Set all configuration as environment variables from the secret
+          echo "AWS_REGION=${{ fromJson(secrets.AWS_CONFIG).aws.region }}" >> $GITHUB_ENV
+          echo "AWS_ACCOUNT_ID=${{ fromJson(secrets.AWS_CONFIG).aws.account_id }}" >> $GITHUB_ENV
+          echo "CLUSTER_NAME=${{ fromJson(secrets.AWS_CONFIG).eks.cluster_name }}" >> $GITHUB_ENV
+          echo "CLUSTER_VERSION=${{ fromJson(secrets.AWS_CONFIG).eks.cluster_version }}" >> $GITHUB_ENV
+          echo "NODE_GROUP_NAME=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.name }}" >> $GITHUB_ENV
+          echo "NODE_INSTANCE_TYPE=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.instance_type }}" >> $GITHUB_ENV
+          echo "NODE_MIN=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.min_size }}" >> $GITHUB_ENV
+          echo "NODE_MAX=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.max_size }}" >> $GITHUB_ENV
+          echo "NODE_DESIRED=${{ fromJson(secrets.AWS_CONFIG).eks.node_group.desired_size }}" >> $GITHUB_ENV
+          echo "ECR_REPOSITORY_NAME=${{ fromJson(secrets.AWS_CONFIG).ecr.repository_name }}" >> $GITHUB_ENV
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v3
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-access-key-id: ${{ fromJson(secrets.AWS_CONFIG).aws.access_key_id }}
+          aws-secret-access-key: ${{ fromJson(secrets.AWS_CONFIG).aws.secret_access_key }}
+          aws-region: ${{ fromJson(secrets.AWS_CONFIG).aws.region }}
 
-      # Step 5: Create ECR repository if it doesn't exist
-      - name: Create ECR repository if not exists
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+
+      - name: Create ECR repository
         run: |
-          ECR_REPO_NAME=document-service
-          aws ecr describe-repositories --repository-names $ECR_REPO_NAME || \
-          aws ecr create-repository --repository-name $ECR_REPO_NAME
+          if ! aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} >/dev/null 2>&1; then
+            echo "Creating ECR repository: ${ECR_REPOSITORY_NAME}"
+            aws ecr create-repository \
+              --repository-name ${ECR_REPOSITORY_NAME} \
+              --image-scanning-configuration scanOnPush=true \
+              --encryption-configuration encryptionType=AES256
+          else
+            echo "ECR repository already exists"
+          fi
 
-      # Step 6: Log in to Amazon ECR
+      - name: Check and create EKS cluster
+        run: |
+          # Function to check command status
+          check_status() {
+            if [ $? -ne 0 ]; then
+              echo "Error: $1 failed"
+              exit 1
+            fi
+          }
+
+          if ! aws eks describe-cluster --name ${CLUSTER_NAME} >/dev/null 2>&1; then
+            echo "Creating EKS cluster: ${CLUSTER_NAME}"
+          
+            # Step 1: Get available AZs
+            echo "Getting available availability zones..."
+            AZONES=$(aws ec2 describe-availability-zones \
+              --region ${CLUSTER_REGION} \
+              --filters "Name=state,Values=available" \
+              --query 'AvailabilityZones[0:3].ZoneName' \
+              --output text)
+            check_status "Get availability zones"
+
+            IFS=$'\t' read -r -a AZ_ARRAY <<< "$AZONES"
+            echo "Using availability zones: ${AZ_ARRAY[0]}, ${AZ_ARRAY[1]}, ${AZ_ARRAY[2]}"
+
+            # Step 2: Check and Create VPC
+            echo "Checking for existing VPC..."
+            VPC_ID=$(aws ec2 describe-vpcs \
+              --filters "Name=tag:Name,Values=eks-vpc" \
+              --query 'Vpcs[0].VpcId' --output text)
+
+            if [ "$VPC_ID" == "None" ] || [ -z "$VPC_ID" ]; then
+              echo "Creating VPC..."
+              VPC_ID=$(aws ec2 create-vpc \
+                --cidr-block 10.0.0.0/16 \
+                --tag-specifications "ResourceType=vpc,Tags=[{Key=Name,Value=eks-vpc},{Key=kubernetes.io/cluster/${CLUSTER_NAME},Value=shared}]" \
+                --query 'Vpc.VpcId' --output text)
+              check_status "VPC creation"
+          
+              echo "Waiting for VPC to be available..."
+              aws ec2 wait vpc-available --vpc-ids ${VPC_ID}
+          
+              echo "Configuring VPC..."
+              aws ec2 modify-vpc-attribute --vpc-id ${VPC_ID} --enable-dns-hostnames
+              aws ec2 modify-vpc-attribute --vpc-id ${VPC_ID} --enable-dns-support
+              check_status "VPC configuration"
+            else
+              echo "Using existing VPC: ${VPC_ID}"
+            fi
+
+            # Step 3: Check and Create Subnets
+            echo "Checking for existing subnets..."
+            EXISTING_SUBNET_IDS=$(aws ec2 describe-subnets \
+              --filters "Name=vpc-id,Values=${VPC_ID}" "Name=tag:Name,Values=eks-subnet-*" \
+              --query 'Subnets[*].SubnetId' --output text)
+
+            if [ -z "$EXISTING_SUBNET_IDS" ]; then
+              echo "Creating subnets..."
+              SUBNET_IDS=()
+              for i in {0..2}; do
+                echo "Creating subnet in ${AZ_ARRAY[$i]}..."
+                SUBNET_ID=$(aws ec2 create-subnet \
+                  --vpc-id ${VPC_ID} \
+                  --cidr-block "10.0.$((i+1)).0/24" \
+                  --availability-zone "${AZ_ARRAY[$i]}" \
+                  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=eks-subnet-$((i+1))},{Key=kubernetes.io/cluster/${CLUSTER_NAME},Value=shared},{Key=kubernetes.io/role/elb,Value=1}]" \
+                  --query 'Subnet.SubnetId' --output text)
+                check_status "Subnet creation in ${AZ_ARRAY[$i]}"
+                SUBNET_IDS+=($SUBNET_ID)
+          
+                echo "Enabling auto-assign public IP for subnet ${SUBNET_ID}..."
+                aws ec2 modify-subnet-attribute --subnet-id ${SUBNET_ID} --map-public-ip-on-launch
+                check_status "Subnet public IP configuration"
+              done
+            else
+              echo "Using existing subnets: ${EXISTING_SUBNET_IDS}"
+              IFS=$'\t' read -r -a SUBNET_IDS <<< "$EXISTING_SUBNET_IDS"
+            fi
+
+            # Step 4: Check and Create Internet Gateway
+            echo "Checking for existing Internet Gateway..."
+            IGW_ID=$(aws ec2 describe-internet-gateways \
+              --filters "Name=tag:Name,Values=eks-igw" "Name=attachment.vpc-id,Values=${VPC_ID}" \
+              --query 'InternetGateways[0].InternetGatewayId' --output text)
+
+            if [ "$IGW_ID" == "None" ] || [ -z "$IGW_ID" ]; then
+              echo "Creating Internet Gateway..."
+              IGW_ID=$(aws ec2 create-internet-gateway \
+                --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=Name,Value=eks-igw}]" \
+                --query 'InternetGateway.InternetGatewayId' --output text)
+              check_status "Internet Gateway creation"
+          
+              echo "Attaching Internet Gateway to VPC..."
+              aws ec2 attach-internet-gateway --internet-gateway-id ${IGW_ID} --vpc-id ${VPC_ID}
+              check_status "Internet Gateway attachment"
+            else
+              echo "Using existing Internet Gateway: ${IGW_ID}"
+            fi
+
+            # Step 5: Check and Create Route Table
+            echo "Checking for existing route table..."
+            ROUTE_TABLE_ID=$(aws ec2 describe-route-tables \
+              --filters "Name=vpc-id,Values=${VPC_ID}" "Name=tag:Name,Values=eks-rtb" \
+              --query 'RouteTables[0].RouteTableId' --output text)
+
+            if [ "$ROUTE_TABLE_ID" == "None" ] || [ -z "$ROUTE_TABLE_ID" ]; then
+              echo "Creating route table..."
+              ROUTE_TABLE_ID=$(aws ec2 create-route-table \
+                --vpc-id ${VPC_ID} \
+                --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=eks-rtb}]" \
+                --query 'RouteTable.RouteTableId' --output text)
+              check_status "Route table creation"
+          
+              echo "Creating route to Internet Gateway..."
+              aws ec2 create-route \
+                --route-table-id ${ROUTE_TABLE_ID} \
+                --destination-cidr-block 0.0.0.0/0 \
+                --gateway-id ${IGW_ID}
+              check_status "Route creation"
+          
+              echo "Associating route table with subnets..."
+              for SUBNET_ID in "${SUBNET_IDS[@]}"; do
+                aws ec2 associate-route-table --route-table-id ${ROUTE_TABLE_ID} --subnet-id ${SUBNET_ID}
+                check_status "Route table association with subnet ${SUBNET_ID}"
+              done
+            else
+              echo "Using existing route table: ${ROUTE_TABLE_ID}"
+            fi
+
+            # Step 6: Check and Create IAM Roles
+            echo "Checking for cluster IAM role..."
+            if ! aws iam get-role --role-name EKSClusterRole-${CLUSTER_NAME} >/dev/null 2>&1; then
+              echo "Creating cluster IAM role..."
+              aws iam create-role \
+                --role-name EKSClusterRole-${CLUSTER_NAME} \
+                --assume-role-policy-document '{
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {
+                      "Service": "eks.amazonaws.com"
+                    },
+                    "Action": "sts:AssumeRole"
+                  }]
+                }'
+              check_status "Cluster IAM role creation"
+          
+              echo "Attaching cluster IAM policy..."
+              aws iam attach-role-policy \
+                --role-name EKSClusterRole-${CLUSTER_NAME} \
+                --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+              check_status "Cluster IAM policy attachment"
+            else
+              echo "Cluster IAM role already exists"
+            fi
+
+            echo "Checking for node group IAM role..."
+            if ! aws iam get-role --role-name EKSNodeRole-${CLUSTER_NAME} >/dev/null 2>&1; then
+              echo "Creating node group IAM role..."
+              aws iam create-role \
+                --role-name EKSNodeRole-${CLUSTER_NAME} \
+                --assume-role-policy-document '{
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {
+                      "Service": "ec2.amazonaws.com"
+                    },
+                    "Action": "sts:AssumeRole"
+                  }]
+                }'
+              check_status "Node group IAM role creation"
+          
+              echo "Attaching node group IAM policies..."
+              NODE_POLICIES=(
+                "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+                "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+                "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+                "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+              )
+          
+              for POLICY in "${NODE_POLICIES[@]}"; do
+                aws iam attach-role-policy \
+                  --role-name EKSNodeRole-${CLUSTER_NAME} \
+                  --policy-arn ${POLICY}
+                check_status "Node group IAM policy attachment: ${POLICY}"
+              done
+            else
+              echo "Node group IAM role already exists"
+            fi
+
+            # Wait for IAM role propagation
+            echo "Waiting for IAM role propagation..."
+            sleep 15
+
+            # Step 7: Create EKS Cluster
+            echo "Creating EKS cluster..."
+            aws eks create-cluster \
+              --name ${CLUSTER_NAME} \
+              --role-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/EKSClusterRole-${CLUSTER_NAME} \
+              --resources-vpc-config "subnetIds=${SUBNET_IDS[0]},${SUBNET_IDS[1]},${SUBNET_IDS[2]},endpointPublicAccess=true,endpointPrivateAccess=true" \
+              --kubernetes-version ${CLUSTER_VERSION} \
+              --logging '{"clusterLogging":[{"types":["api","audit","authenticator","controllerManager","scheduler"],"enabled":true}]}' \
+              --tags Environment=production,Owner=DevOps
+            check_status "EKS cluster creation"
+
+            echo "Waiting for EKS cluster to become active..."
+            aws eks wait cluster-active --name ${CLUSTER_NAME}
+            check_status "EKS cluster activation"
+
+            # Step 8: Create Node Group
+            echo "Creating EKS node group..."
+            aws eks create-nodegroup \
+              --cluster-name ${CLUSTER_NAME} \
+              --nodegroup-name ${NODE_GROUP_NAME} \
+              --node-role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/EKSNodeRole-${CLUSTER_NAME} \
+              --subnets ${SUBNET_IDS[0]} ${SUBNET_IDS[1]} ${SUBNET_IDS[2]} \
+              --disk-size 20 \
+              --instance-types ${NODE_INSTANCE_TYPE} \
+              --ami-type AL2_x86_64 \
+              --capacity-type ON_DEMAND \
+              --scaling-config minSize=${NODE_MIN},maxSize=${NODE_MAX},desiredSize=${NODE_DESIRED} \
+              --update-config maxUnavailable=1 \
+              --labels Environment=production,Type=application \
+              --tags Environment=production,Owner=DevOps
+            check_status "Node group creation"
+
+            echo "Waiting for node group to become active..."
+            aws eks wait nodegroup-active \
+              --cluster-name ${CLUSTER_NAME} \
+              --nodegroup-name ${NODE_GROUP_NAME}
+            check_status "Node group activation"
+
+            echo "EKS cluster and node group creation completed successfully!"
+          else
+            echo "EKS cluster ${CLUSTER_NAME} already exists"
+          fi
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${CLUSTER_NAME} --region ${CLUSTER_REGION}
+
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v1
 
-      # Step 7: Build the Docker image
-      - name: Build Docker image
+      - name: Build and push Docker image
         run: |
           IMAGE_TAG=${{ github.sha }}
-          IMAGE_NAME=document-service-app
           ECR_REGISTRY=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-          docker build -t $ECR_REGISTRY/$IMAGE_NAME:$IMAGE_TAG .
+          docker build -t $ECR_REGISTRY/${ECR_REPOSITORY_NAME}:${IMAGE_TAG} -f docker/Dockerfile .
+          docker push $ECR_REGISTRY/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}
 
-      # Step 8: Push the Docker image to ECR
-      - name: Push Docker image to ECR
+      - name: Deploy RabbitMQ
         run: |
-          IMAGE_TAG=${{ github.sha }}
-          IMAGE_NAME=document-service-app
-          ECR_REGISTRY=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-          docker push $ECR_REGISTRY/$IMAGE_NAME:$IMAGE_TAG
+          kubectl apply -f k8s/rabbit_mq_deployment.yaml
+          kubectl rollout status deployment rabbitmq
 
-      # Step 9: Update the Kubernetes deployment YAML to use the new image
-      - name: Update deployment image in Kubernetes YAML
+      - name: Deploy application
         run: |
-          IMAGE_TAG=${{ github.sha }}
-          IMAGE_NAME=document-service-app
-          ECR_REGISTRY=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-          sed -i "s|<IMAGE_PLACEHOLDER>|$ECR_REGISTRY/$IMAGE_NAME:$IMAGE_TAG|g" k8s/deployment.yaml
-
-      # Step 10: Install kubectl
-      - name: Install kubectl
-        run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
-
-      # Step 11: Update kubeconfig for EKS
-      - name: Update kubeconfig
-        run: |
-          aws eks update-kubeconfig --region ${{ secrets.AWS_REGION }} --name my-eks-cluster  # Replace with your EKS cluster name
-
-      # Step 12: Deploy to EKS using kubectl
-      - name: Deploy to EKS
-        run: |
+          # Set the image URL
+          IMAGE_URL="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${ECR_REPOSITORY_NAME}:${{ github.sha }}"
+          
+          # Replace the placeholder in the deployment file
+          sed -i "s|<IMAGE_PLACEHOLDER>|$IMAGE_URL|g" k8s/deployment.yaml
+          
+          # Apply the deployment
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
-
-      # Step 13: Verify deployment status
-      - name: Verify Deployment
-        run: |
           kubectl rollout status deployment document-service-app

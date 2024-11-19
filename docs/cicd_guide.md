@@ -1,40 +1,90 @@
-# CI/CD Pipeline for Document Service
-
-This document outlines the CI/CD pipeline setup for the **Document Service** using GitHub Actions. The pipeline automates the build, test, and deployment processes for code pushed to the `master` branch.
+# Build, Test and Deploy Service to EKS GitHub Action
 
 ## Overview
 
-The CI/CD pipeline ensures that code changes are automatically tested and deployed to the production environment hosted on Amazon Elastic Kubernetes Service (EKS).
+The workflow consists of two main jobs:
+- **`test`**: Builds and runs tests for the service.
+- **`deploy`**: Deploys the service to EKS after successful testing.
+
+### Features
+- Runs on `ubuntu-latest`.
+- Uses RabbitMQ service for integration tests.
+- Loads AWS configurations from a secret JSON stored in GitHub secrets.
+- Builds the service using Maven.
+- Pushes Docker images to Amazon ECR.
+- Creates an EKS cluster and node group if they do not exist.
+- Deploys the application and services to the EKS cluster.
+
+## Workflow Details
 
 ### Trigger
+- The workflow is triggered by a `push` event on the `master` branch.
 
-- The workflow is triggered whenever code is pushed to the `master` branch.
+### Jobs
 
-## Required GitHub Secrets
+#### 1. **Test Job**
+- **Runs-on**: `ubuntu-latest`
+- **Services**: RabbitMQ
+- **Steps**:
+    - Checkout the code.
+    - Set up JDK 21 with Maven cache.
+    - Load AWS configuration from secrets.
+    - Run unit tests (`mvn test`).
+    - Run integration tests (`mvn verify -P integration-test`).
+    - Upload test reports as artifacts.
 
-To run the CI/CD pipeline, the following secrets need to be configured in your GitHub repository under **Settings** > **Secrets and variables** > **Actions**:
+#### 2. **Deploy Job**
+- **Runs-on**: `ubuntu-latest`
+- **Needs**: `test` job (depends on the successful completion of the `test` job)
+- **Steps**:
+    - Checkout the code.
+    - Load AWS configuration from secrets.
+    - Set up JDK 21 with Maven cache.
+    - Configure AWS credentials using `aws-actions/configure-aws-credentials`.
+    - Build the application using Maven (`mvn clean package`).
+    - Check if ECR repository exists; create it if not.
+    - Check if EKS cluster and node group exist; create them if needed.
+    - Update kubeconfig for cluster access.
+    - Log in to Amazon ECR and push the Docker image.
+    - Deploy RabbitMQ to the cluster.
+    - Deploy the application by updating the image URL in Kubernetes manifests.
 
-| Secret Name             | Description                                                      |
-|-------------------------|------------------------------------------------------------------|
-| `AWS_ACCOUNT_ID`        | Your AWS Account ID where the ECR and EKS clusters are hosted.  |
-| `AWS_ACCESS_KEY_ID`     | AWS access key with appropriate permissions.                     |
-| `AWS_SECRET_ACCESS_KEY` | Secret access key for AWS authentication.                        |
-| `AWS_REGION`            | The AWS region (e.g., `us-west-2`) for ECR and EKS.              |
+## Environment Variables
+These are loaded from the GitHub secret `AWS_CONFIG`:
+```json
+{
+  "aws": {
+    "region": "****",
+    "account_id": "****",
+    "access_key_id": "****",
+    "secret_access_key": "****"
+  },
+  "eks": {
+    "cluster_name": "****",
+    "cluster_version": "1.31",
+    "node_group": {
+      "name": "****",
+      "instance_type": "t3a.medium",
+      "min_size": 2,
+      "max_size": 3,
+      "desired_size": 2
+    }
+  },
+  "ecr": {
+    "repository_name": "****"
+  }
+}
 
-## Pipeline Steps
 
-The CI/CD workflow consists of the following steps:
+## Prerequisites
+- Store the AWS configurations in GitHub secrets as `AWS_CONFIG` in JSON format.
+- Kubernetes manifests (`k8s/deployment.yaml`, `k8s/service.yaml`, `k8s/rabbit_mq_deployment.yaml`) should be included in the repository.
+- Ensure IAM roles and permissions are configured in AWS for creating and managing EKS resources.
 
-1. **Checkout Code**: Clones the repository to the workflow runner.
-2. **Set Up JDK 21**: Configures the build environment with Java 21.
-3. **Build with Maven**: Compiles and packages the application.
-4. **Configure AWS Credentials**: Authenticates with AWS using GitHub secrets.
-5. **Create ECR Repository**: Checks if the ECR repository exists; if not, creates it.
-6. **Log in to Amazon ECR**: Authenticates Docker to Amazon ECR.
-7. **Build Docker Image**: Builds the Docker image and tags it with the commit SHA and `latest`.
-8. **Push Docker Image to ECR**: Pushes the Docker image to the Amazon ECR.
-9. **Update Kubernetes Deployment YAML**: Updates the image in the Kubernetes deployment file.
-10. **Install `kubectl`**: Installs `kubectl` for interacting with the EKS cluster.
-11. **Update kubeconfig for EKS**: Configures access to the EKS cluster.
-12. **Deploy to EKS**: Applies the updated configuration using `kubectl`.
-13. **Verify Deployment**: Checks the deployment status for successful rollout.
+## Usage
+To use this workflow:
+1. Copy and save the provided YAML configuration in `.github/workflows/deploy.yml` in your repository.
+2. Ensure the required secrets and Kubernetes deployment files are in place.
+3. Push changes to the `master` branch to trigger the workflow.
+
+This workflow helps streamline the CI/CD pipeline by automating the testing, containerization, and deployment of services to EKS.
