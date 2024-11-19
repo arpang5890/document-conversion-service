@@ -27,10 +27,12 @@ public class DocumentConversionService {
 
   @Transactional
   public void startConversion(UUID documentId) {
-    Document document =
-        documentRepository
-            .findById(documentId)
-            .orElseThrow(() -> new DocumentNotFoundException("Document not found"));
+    Document document = documentRepository.findById(documentId).orElse(null);
+    if (document == null) {
+      log.warn("document: {} not found", documentId);
+      return;
+    }
+
     Timer.Sample sample = null;
     try {
       sample = metricsService.startTimer();

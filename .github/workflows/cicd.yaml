@@ -236,62 +236,79 @@ jobs:
             else
               echo "Using existing route table: ${ROUTE_TABLE_ID}"
             fi
-
+          
+            # Step 6: Check and Create IAM Roles
+            echo "Checking for cluster IAM role..."
+            if ! aws iam get-role --role-name EKSClusterRole-${CLUSTER_NAME} >/dev/null 2>&1; then
             echo "Creating cluster IAM role..."
             CLUSTER_ROLE_ARN=$(aws iam create-role \
-              --role-name EKSClusterRole-${CLUSTER_NAME} \
-              --assume-role-policy-document '{
-                "Version": "2012-10-17",
-                "Statement": [{
-                  "Effect": "Allow",
-                  "Principal": {
-                    "Service": "eks.amazonaws.com"
-                  },
-                  "Action": "sts:AssumeRole"
-                }]
+            --role-name EKSClusterRole-${CLUSTER_NAME} \
+            --assume-role-policy-document '{
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "eks.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }]
               }' \
               --query 'Role.Arn' --output text)
             check_status "Cluster IAM role creation"
-          
+            
+            echo "Attaching cluster IAM policy..."
             aws iam attach-role-policy \
-              --role-name EKSClusterRole-${CLUSTER_NAME} \
-              --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+            --role-name EKSClusterRole-${CLUSTER_NAME} \
+            --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
             check_status "Cluster IAM policy attachment"
-          
+            else
+            echo "Cluster IAM role already exists"
+            CLUSTER_ROLE_ARN=$(aws iam get-role --role-name EKSClusterRole-${CLUSTER_NAME} --query 'Role.Arn' --output text)
+            fi
+            
+            echo "Checking for node group IAM role..."
+            if ! aws iam get-role --role-name EKSNodeRole-${CLUSTER_NAME} >/dev/null 2>&1; then
             echo "Creating node group IAM role..."
             NODE_ROLE_ARN=$(aws iam create-role \
-              --role-name EKSNodeRole-${CLUSTER_NAME} \
-              --assume-role-policy-document '{
-                "Version": "2012-10-17",
-                "Statement": [{
-                  "Effect": "Allow",
-                  "Principal": {
-                    "Service": "ec2.amazonaws.com"
-                  },
-                  "Action": "sts:AssumeRole"
-                }]
+            --role-name EKSNodeRole-${CLUSTER_NAME} \
+            --assume-role-policy-document '{
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "ec2.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }]
               }' \
               --query 'Role.Arn' --output text)
             check_status "Node group IAM role creation"
-
-            NODE_POLICIES=(
-              "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-              "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-              "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-              "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-            )
           
+            echo "Attaching node group IAM policies..."
+            NODE_POLICIES=(
+            "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+            "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+            "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+            "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+            )
+            
             for POLICY in "${NODE_POLICIES[@]}"; do
-              aws iam attach-role-policy \
-                --role-name EKSNodeRole-${CLUSTER_NAME} \
-                --policy-arn ${POLICY}
-              check_status "Node group IAM policy attachment: ${POLICY}"
+            aws iam attach-role-policy \
+            --role-name EKSNodeRole-${CLUSTER_NAME} \
+            --policy-arn ${POLICY}
+          check_status "Node group IAM policy attachment: ${POLICY}"
             done
-
-            # Wait for IAM role propagation
+            else
+            echo "Node group IAM role already exists"
+            NODE_ROLE_ARN=$(aws iam get-role --role-name EKSNodeRole-${CLUSTER_NAME} --query 'Role.Arn' --output text)
+            fi
+            
+            # Wait for IAM role propagation only if roles were created
+            if [ "$CREATED_NEW_ROLES" = true ]; then
             echo "Waiting for IAM role propagation..."
             sleep 15
-
+            fi
+                                                  
             # Step 7: Create EKS Cluster with correct role ARN
             echo "Creating EKS cluster..."
             aws eks create-cluster \
