@@ -361,9 +361,12 @@ jobs:
       - name: Build and push Docker image
         run: |
           IMAGE_TAG=${{ github.sha }}
-          ECR_REGISTRY=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-          docker build -t $ECR_REGISTRY/${ECR_REPOSITORY_NAME}:${IMAGE_TAG} -f docker/Dockerfile .
-          docker push $ECR_REGISTRY/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}
+          echo "Building image with AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID}"
+          ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+          FULL_IMAGE_NAME=${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:${IMAGE_TAG}
+          echo "Building image: ${FULL_IMAGE_NAME}"
+          docker build -t ${FULL_IMAGE_NAME} -f docker/Dockerfile .
+          docker push ${FULL_IMAGE_NAME}
 
       - name: Deploy RabbitMQ
         run: |
